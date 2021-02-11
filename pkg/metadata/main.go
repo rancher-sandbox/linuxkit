@@ -54,7 +54,7 @@ func main() {
 		log.SetLevel(log.DebugLevel)
 	}
 
-	providers := []string{"aws", "gcp", "hetzner", "openstack", "scaleway", "vultr", "digitalocean", "packet", "metaldata", "vmware", "cdrom", "azire-imds", "azure-ovf"}
+	providers := []string{"aws", "gcp", "hetzner", "openstack", "scaleway", "vultr", "digitalocean", "packet", "metaldata", "vmware", "cdrom", "azure"}
 	args := flag.Args()
 	if len(args) > 0 {
 		providers = args
@@ -79,14 +79,8 @@ func main() {
 			netProviders = append(netProviders, prv.NewDigitalOcean())
 		case p == "metaldata":
 			netProviders = append(netProviders, prv.NewMetalData())
-		case p == "azure-imds":
+		case p == "azure":
 			netProviders = append(netProviders, prv.NewAzureIMDS())
-		case p == "azure-ovf":
-			// TODO not every provider should create a separate http client
-			client := &http.Client{
-				Timeout: time.Second * 2,
-			}
-			netProviders = append(netProviders, prv.NewAzureOVF(client))
 		case p == "vmware":
 			vmw := prv.NewVMware()
 			if vmw != nil {
@@ -175,15 +169,13 @@ func main() {
 
 // If the userdata is a json file, create a directory/file hierarchy.
 // Example:
-//
-//	{
-//	   "foobar" : {
-//	       "foo" : {
-//	           "perm": "0644",
-//	           "content": "hello"
-//	       }
-//	}
-//
+// {
+//    "foobar" : {
+//        "foo" : {
+//            "perm": "0644",
+//            "content": "hello"
+//        }
+// }
 // Will create foobar/foo with mode 0644 and content "hello"
 func processUserData(basePath string, data []byte) error {
 	// Always write the raw data to a file
