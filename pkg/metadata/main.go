@@ -3,15 +3,12 @@ package main
 import (
 	"encoding/json"
 	"flag"
-	"fmt"
 	"io/ioutil"
-	"net/http"
 	"os"
 	"path"
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	prv "github.com/rancher-sandbox/linuxkit/pkg/metadata/providers"
 	log "github.com/sirupsen/logrus"
@@ -54,7 +51,19 @@ func main() {
 		log.SetLevel(log.DebugLevel)
 	}
 
-	providers := []string{"aws", "gcp", "hetzner", "openstack", "scaleway", "vultr", "digitalocean", "packet", "metaldata", "vmware", "cdrom", "azure"}
+	providers := []string{
+		"aws",
+		"gcp",
+		"hetzner",
+		"openstack",
+		"scaleway",
+		"vultr",
+		"digitalocean",
+		"packet",
+		"metaldata",
+		"cdrom",
+		"azure",
+	}
 	args := flag.Args()
 	if len(args) > 0 {
 		providers = args
@@ -63,6 +72,8 @@ func main() {
 		switch {
 		case p == "aws":
 			netProviders = append(netProviders, prv.NewAWS())
+		case p == "azure":
+			netProviders = append(netProviders, prv.NewAzure())
 		case p == "gcp":
 			netProviders = append(netProviders, prv.NewGCP())
 		case p == "hetzner":
@@ -79,8 +90,6 @@ func main() {
 			netProviders = append(netProviders, prv.NewDigitalOcean())
 		case p == "metaldata":
 			netProviders = append(netProviders, prv.NewMetalData())
-		case p == "azure":
-			netProviders = append(netProviders, prv.NewAzureIMDS())
 		case p == "vmware":
 			vmw := prv.NewVMware()
 			if vmw != nil {
@@ -255,24 +264,4 @@ type Entry struct {
 	Perm    string           `json:"perm,omitempty"`
 	Content *string          `json:"content,omitempty"`
 	Entries map[string]Entry `json:"entries,omitempty"`
-}
-
-// https://stackoverflow.com/questions/47606761/repeat-code-if-an-error-occured/47606858#47606858
-// https://blog.abourget.net/en/2016/01/04/my-favorite-golang-retry-function/
-func retry(attempts int, sleep time.Duration, f func() error) (err error) {
-	for i := 0; ; i++ {
-		err = f()
-		if err == nil {
-			return
-		}
-
-		if i >= (attempts - 1) {
-			break
-		}
-
-		time.Sleep(sleep)
-
-		log.Printf("retrying after error:", err)
-	}
-	return fmt.Errorf("after %d attempts, last error: %s", attempts, err)
 }
