@@ -13,7 +13,6 @@ import (
 )
 
 const (
-	metadataFile     = "meta-data"
 	userdataFile     = "user-data"
 	userdataFallback = "config"
 	cdromDevs        = "/dev/sr[0-9]*"
@@ -27,10 +26,10 @@ var (
 // ProviderCDROM is the type implementing the Provider interface for CDROMs
 // It looks for file called 'meta-data', 'user-data' or 'config' in the root
 type ProviderCDROM struct {
-	device             string
-	mountPoint         string
-	err                error
-	userdata, metadata []byte
+	device     string
+	mountPoint string
+	err        error
+	userdata   []byte
 }
 
 // ListCDROMs lists all the cdroms in the system
@@ -48,7 +47,7 @@ func ListCDROMs() []Provider {
 	cdroms = append(cidevs, cdroms...)
 	cdroms = uniqueString(cdroms)
 	log.Debugf("unique devices to be checked: %v", cdroms)
-	var providers []Provider
+	providers := []Provider{}
 	for _, device := range cdroms {
 		providers = append(providers, NewCDROM(device))
 	}
@@ -65,7 +64,7 @@ func FindCIs() []string {
 		// Glob can only error on invalid pattern
 		panic(fmt.Sprintf("Invalid glob pattern: %s", blockDevs))
 	}
-	var foundDevices []string
+	foundDevices := []string{}
 	for _, device := range devs {
 		// get the base device name
 		dev := filepath.Base(device)
@@ -107,9 +106,10 @@ func FindCIs() []string {
 // NewCDROM returns a new ProviderCDROM
 func NewCDROM(device string) *ProviderCDROM {
 	mountPoint, err := os.MkdirTemp("", "cd")
-	p := ProviderCDROM{device, mountPoint, err, []byte{}, []byte{}}
+	p := ProviderCDROM{device, mountPoint, err, []byte{}}
 	if err == nil {
 		if p.err = p.mount(); p.err == nil {
+			defer p.unmount()
 			// read the userdata - we read the spec file and the fallback, but eventually
 			// will remove the fallback
 			for _, f := range userdataFiles {
@@ -121,15 +121,8 @@ func NewCDROM(device string) *ProviderCDROM {
 				}
 			}
 			if p.userdata == nil {
-				p.err = fmt.Errorf("no userdata file found at any of %v", userdataFiles)
+				log.Debugf("no userdata file found at any of %v", userdataFiles)
 			}
-			// read the metadata
-			metadata, err := os.ReadFile(path.Join(p.mountPoint, metadataFile))
-			// did we find a file?
-			if err == nil && metadata != nil {
-				p.metadata = metadata
-			}
-			p.unmount()
 		}
 	}
 	return &p
@@ -141,6 +134,9 @@ func (p *ProviderCDROM) String() string {
 
 // Probe checks if the CD has the right file
 func (p *ProviderCDROM) Probe() bool {
+	if p.err != nil {
+		log.Errorf("there were errors probing %s: %v", p.device, p.err)
+	}
 	return len(p.userdata) != 0
 }
 
@@ -151,8 +147,17 @@ func (p *ProviderCDROM) Extract() ([]byte, error) {
 
 // mount mounts a CDROM/DVD device under mountPoint
 func (p *ProviderCDROM) mount() error {
+	var err error
 	// We may need to poll a little for device ready
-	return syscall.Mount(p.device, p.mountPoint, "iso9660", syscall.MS_RDONLY, "")
+	errISO := syscall.Mount(p.device, p.mountPoint, "iso9660", syscall.MS_RDONLY, "")
+	if errISO != nil {
+		errFat := syscall.Mount(p.device, p.mountPoint, "vfat", syscall.MS_RDONLY, "")
+		if errFat != nil {
+			err = fmt.Errorf("failed mounting %s: %v %v", p.device, errISO, errFat)
+			p.err = err
+		}
+	}
+	return err
 }
 
 // unmount removes the mount
