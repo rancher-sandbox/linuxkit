@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"flag"
-	"io/ioutil"
 	"os"
 	"path"
 	"strconv"
@@ -178,13 +177,15 @@ func main() {
 
 // If the userdata is a json file, create a directory/file hierarchy.
 // Example:
-// {
-//    "foobar" : {
-//        "foo" : {
-//            "perm": "0644",
-//            "content": "hello"
-//        }
-// }
+//
+//	{
+//	   "foobar" : {
+//	       "foo" : {
+//	           "perm": "0644",
+//	           "content": "hello"
+//	       }
+//	}
+//
 // Will create foobar/foo with mode 0644 and content "hello"
 func processUserData(basePath string, data []byte) error {
 	// Always write the raw data to a file
