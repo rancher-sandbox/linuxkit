@@ -1,4 +1,0 @@
-image: vpnkit-expose-port
-network: true
-arches:
-  - amd64

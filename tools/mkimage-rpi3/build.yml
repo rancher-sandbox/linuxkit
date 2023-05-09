@@ -1,4 +1,0 @@
-image: mkimage-rpi3
-network: true
-arches:
-  - arm64

@@ -10,6 +10,7 @@ Alex Szakaly <alex.szakaly@gmail.com>
 Alexander Slesarev <alex.slesarev@nudatasecurity.com>
 Alice Frosi <alice@linux.vnet.ibm.com>
 Amir Chaudhry <amir.chaudhry@docker.com>
+Anca Iordache <anca.iordache@docker.com>
 Anil Madhavapeddy <anil.madhavapeddy@docker.com>
 Arthur Lutz <arthur.lutz@logilab.fr>
 Asbjorn Enge <asbjorn@hanafjedle.net>
@@ -17,6 +18,7 @@ Avi Deitcher <avi@deitcher.net>
 Aymen EL AMRI <aymen@eralabs.io>
 Ben Allen <bsallen@alcf.anl.gov>
 Bill Kerr <bill@generalbill.com>
+Birol Bilgin <birolbilgin@gmail.com>
 Björn Ingeson <bjorn.ingeson@gmail.com>
 Brice Figureau <brice-puppet@daysofwonder.com>
 Carlton-Semple <carlton.semple@ibm.com>
@@ -30,23 +32,32 @@ Daniel Caminada <daniel.caminada@ergon.ch>
 Daniel Dean <daniel@razorsecure.com>
 Daniel Hiltgen <daniel.hiltgen@docker.com>
 Daniel Nephin <dnephin@gmail.com>
+Danny Bessems <github.com.danny@spamasaurus.com>
 Dave Freitag <dcfreita@us.ibm.com>
 Dave Tucker <dt@docker.com>
+David Cassany <dcassany@suse.com>
 David Gageot <david.gageot@docker.com>
 David Manouchehri <david.manouchehri@riseup.net>
 David Protasowski <dprotaso@gmail.com>
 David Scott <dave.scott@docker.com>
 David Sheets <david.sheets@docker.com>
+Davide Brini <waldner@katamail.com>
 Dennis Chen <dennis.chen@arm.com>
 Dieter Reuter <dieter.reuter@me.com>
 Dominic White <singe-github@singe.za.net>
 duraki <duraki@linuxmail.org>
+Edvin Eriksson <edvin.erikson@leovegas.com>
 Edward Vielmetti <edward.vielmetti@gmail.com>
 Emily Casey <ecasey@pivotal.io>
+Emmanuel Briney <emmanuel.briney@docker.com>
 Eric Briand <eric.briand@gmail.com>
+Erik Nordmark <erik@zededa.com>
+Ettore Di Giacinto <edigiacinto@suse.com>
 Evan Hazlett <ejhazlett@gmail.com>
 Federico Pellegatta <12744504+federico-pellegatta@users.noreply.github.com>
+Frederic Dalleau <frederic.dalleau@docker.com>
 French Ben <frenchben@docker.com>
+Frédéric Dalleau <79831213+fredericdalleau@users.noreply.github.com>
 Frédéric Dalleau <frederic.dalleau@docker.com>
 functor <meehow@gmail.com>
 Gabriel Chabot <gabriel.chabot@qarnot-computing.com>
@@ -61,10 +72,12 @@ Ian Campbell <ian.campbell@docker.com>
 Ilya Dmitrichenko <errordeveloper@gmail.com>
 Isaac Rodman <isaac@eyz.us>
 Istvan Szukacs <l1x@users.noreply.github.com>
+Itxaka <itxak.garcia@spectrocloud.com>
 Ivan Markin <sw@nogoegst.net>
 James McCoy <james@mcy.email>
 Jason A. Donenfeld <Jason@zx2c4.com>
 Jeff Wu <jeff.wu.junfei@gmail.com>
+Jeffrey 'jf' Lim <jf@users.noreply.github.com>
 Jeffrey Hogan <jeff.hogan1@gmail.com>
 Jeremy Yallop <yallop@docker.com>
 Jes Ferrier <jes.ferrier@gmail.com>
@@ -89,6 +102,7 @@ Madhu Venugopal <madhu@docker.com>
 Magnus Skjegstad <magnus.skjegstad@docker.com>
 Marco Mariani <marco.mariani@alterway.fr>
 Marcus van Dam <marcus@marcusvandam.nl>
+Marcus Weiner <marcus.weiner@gmail.com>
 Mario Loriedo <mario.loriedo@gmail.com>
 marten <marten.cassel@gmail.com>
 Mathieu Champlon <mathieu.champlon@docker.com>
@@ -97,6 +111,7 @@ Matt Bajor <matt.bajor@workday.com>
 Matt Bentley <matt.bentley@docker.com>
 Matt Johnson <matjohn2@cisco.com>
 Michael Aldridge <aldridge.mac@gmail.com>
+Michael Schnerring <3743342+schnerring@users.noreply.github.com>
 Michel Courtine <michel.courtine@docker.com>
 Mickaël Salaün <mic@digikod.net>
 Mindy Preston <mindy.preston@docker.com>
@@ -104,11 +119,13 @@ MinJae Kwon <mingrammer@gmail.com>
 Natanael Copa <natanael.copa@docker.com>
 Nathan Dautenhahn <ndd@rice.edu>
 Nathan LeClaire <nathan.leclaire@docker.com>
+Neil Gerring <ng@neilgerring.co.uk>
 Nick Jones <nick@dischord.org>
 Niclas Mietz <niclas@mietz.io>
 Nico Di Rocco <dirocco.nico@gmail.com>
 Olaf Bergner <olaf.bergner@gmx.de>
 Olaf Flebbe <of@oflebbe.de>
+Olli Janatuinen <olli.janatuinen@gmail.com>
 Omar Ramadan <omar.ramadan93@gmail.com>
 Patrik Cyvoct <patrik@ptrk.io>
 Petr Fedchenkov <giggsoff@gmail.com>
@@ -141,6 +158,7 @@ Stefan Bourlon <stefan.bourlon@ca.com>
 Stephen J Day <stephen.day@docker.com>
 Steve Hiehn <shiehn@pivotal.io>
 Sukchan Lee <acetcom@gmail.com>
+Sylvain Prat <sylvain.prat@gmail.com>
 Theo Koulouris <theo.koulouris@hpe.com>
 Thomas Conte <thomas@conte.com>
 Thomas Gazagnaire <thomas.gazagnaire@docker.com>
@@ -152,10 +170,13 @@ Tim Potter <tpot@hpe.com>
 Tobias Gesellchen <tobias@gesellix.de>
 Tobias Klauser <tklauser@distanz.ch>
 Tomas Knappek <tomas.knappek@gmail.com>
+Tonis Tiigi <tonistiigi@gmail.com>
 Tristan Slominski <tristan.slominski@gmail.com>
 Tycho Andersen <tycho@docker.com>
 Vincent Demeester <Vincent.Demeester@docker.com>
 Yoann Ricordel <yoann.ricordel@qarnot-computing.com>
+Yuri Volchkov <yuri@zededa.com>
 Zachery Hostens <zacheryph@gmail.com>
 zimbatm <zimbatm@zimbatm.com>
 zlim <zlim.lnx@gmail.com>
+谢瑶瑶 <yaoyao.xyy@alibaba-inc.com>

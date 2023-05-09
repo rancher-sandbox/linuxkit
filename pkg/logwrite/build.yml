@@ -1,5 +1,0 @@
-image: logwrite
-config:
-  binds:
-    - /var/run:/var/run
-    - /var/log:/var/log
