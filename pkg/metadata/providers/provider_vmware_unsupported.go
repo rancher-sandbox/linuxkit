@@ -1,6 +1,6 @@
 //go:build !(linux && 386 && amd64)
 
-package main
+package providers
 
 // ProviderVMware implements VMware provider interface for unsupported architectures
 type ProviderVMware struct{}
