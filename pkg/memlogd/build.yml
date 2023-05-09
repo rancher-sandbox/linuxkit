@@ -1,3 +1,0 @@
-image: memlogd
-binds:
-    - /var/run:/var/run

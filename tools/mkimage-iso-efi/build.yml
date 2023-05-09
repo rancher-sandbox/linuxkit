@@ -1,5 +1,0 @@
-image: mkimage-iso-efi
-network: true
-arches:
-  - amd64
-  - arm64

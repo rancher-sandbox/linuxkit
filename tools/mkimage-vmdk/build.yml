@@ -1,4 +1,0 @@
-image: mkimage-vmdk
-arches:
-  - amd64
-  - arm64

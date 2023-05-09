@@ -1,5 +1,0 @@
-image: mkimage-qcow2-efi
-network: true
-arches:
-  - amd64
-  - arm64

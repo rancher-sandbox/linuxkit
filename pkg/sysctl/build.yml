@@ -1,7 +1,0 @@
-image: sysctl
-config:
-  pid: "host"
-  readonly: true
-  capabilities:
-    - CAP_SYS_ADMIN
-    - CAP_NET_ADMIN

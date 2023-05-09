@@ -1,5 +1,0 @@
-image: grub
-network: true
-arches:
-  - arm64
-  - amd64

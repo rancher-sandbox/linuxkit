@@ -1,5 +1,0 @@
-image: chained-build-test-second
-network: true
-arches:
-    - amd64
-    - arm64

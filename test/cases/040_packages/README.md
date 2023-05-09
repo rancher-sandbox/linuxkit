@@ -1,3 +1,0 @@
-NOTE: The cases in this directory are ordered alphabetically.
-The index used is the position of the first letter of the name in the alphabet.
-For example, 001_a, 002_b, 003_c etc...
