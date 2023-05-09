@@ -3,13 +3,16 @@ module github.com/rancher-sandbox/linuxkit/pkg/metadata
 go 1.16
 
 require (
-	github.com/diskfs/go-diskfs v1.2.1-0.20230123115902-fce1828bbbfa
+	github.com/diskfs/go-diskfs v1.3.0
+	github.com/google/uuid v1.3.0 // indirect
 	github.com/packethost/packngo v0.1.0
-	github.com/sirupsen/logrus v1.7.0
-	github.com/stretchr/testify v1.7.0 // indirect
+	github.com/pierrec/lz4 v2.6.1+incompatible // indirect
+	github.com/pkg/xattr v0.4.9 // indirect
+	github.com/sirupsen/logrus v1.9.0
+	github.com/ulikunitz/xz v0.5.11 // indirect
 	github.com/vishvananda/netlink v0.0.0-20170808154308-f5a6f697a596
 	github.com/vishvananda/netns v0.0.0-20170707011535-86bef332bfc3 // indirect
-	golang.org/x/crypto v0.0.0-20180515001509-1a580b3eff78 // indirect
-	gopkg.in/airbrake/gobrake.v2 v2.0.9 // indirect
-	gopkg.in/gemnasium/logrus-airbrake-hook.v2 v2.1.2 // indirect
+	github.com/vmware/vmw-guestinfo v0.0.0-20220317130741-510905f0efa3
+	golang.org/x/sys v0.8.0 // indirect
+	gopkg.in/djherbis/times.v1 v1.3.0 // indirect
 )
