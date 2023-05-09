@@ -1,4 +1,4 @@
-module github.com/linuxkit/linuxkit/pkg/metadata
+module github.com/rancher-sandbox/linuxkit/pkg/metadata
 
 go 1.16
 
