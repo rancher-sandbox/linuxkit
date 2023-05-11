@@ -30,7 +30,7 @@ func NewVMware() *ProviderVMware {
 
 // String implements provider interface
 func (p *ProviderVMware) String() string {
-	return ""
+	return "VMWARE"
 }
 
 // Probe implements provider interface
