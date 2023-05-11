@@ -48,7 +48,6 @@ func (p *ProviderMetaldata) String() string {
 
 // Probe checks if we are running on Metaldata
 func (p *ProviderMetaldata) Probe() bool {
-	log.Println("Metaldata: Probing...")
 	// Getting the hostname should always work...
 	_, err := metaldataGet(metaldataMetaDataURL + "hostname")
 	return err == nil
