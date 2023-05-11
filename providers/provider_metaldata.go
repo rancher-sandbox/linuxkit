@@ -43,7 +43,7 @@ func NewMetalData() *ProviderMetaldata {
 }
 
 func (p *ProviderMetaldata) String() string {
-	return "metaldata"
+	return "Metaldata"
 }
 
 // Probe checks if we are running on Metaldata
