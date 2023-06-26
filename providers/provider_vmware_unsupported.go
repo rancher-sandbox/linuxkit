@@ -1,4 +1,4 @@
-//go:build !(linux && 386 && amd64)
+//go:build !(linux && 386) && !(linux && amd64)
 
 /*
 Copyright © 2022 - 2023 SUSE LLC
