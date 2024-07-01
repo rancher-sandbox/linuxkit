@@ -2,13 +2,14 @@ package providers
 
 import (
 	"fmt"
-	"github.com/diskfs/go-diskfs"
-	log "github.com/sirupsen/logrus"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/diskfs/go-diskfs"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -18,11 +19,11 @@ const (
 
 // ProviderCDROM is the type implementing the Provider interface for CDROMs (nocloud/config-drive)
 type ProviderCDROM struct {
-	providerType string
-	device       string
-	mountPoint   string
-	err          error
-	userdata     []byte
+	providerType       string
+	device             string
+	mountPoint         string
+	err                error
+	userdata, metadata []byte
 }
 
 func (p *ProviderCDROM) String() string {
@@ -77,15 +78,15 @@ func uniqueString(input []string) []string {
 	return u
 }
 
-func NewProviderCDROM(device string, datafiles []string, providerType string) *ProviderCDROM {
+func NewProviderCDROM(device string, userdataFiles []string, metadataFile string, providerType string) *ProviderCDROM {
 	mountPoint, err := os.MkdirTemp("", "cd")
-	p := ProviderCDROM{providerType, device, mountPoint, err, []byte{}}
+	p := ProviderCDROM{providerType, device, mountPoint, err, []byte{}, []byte{}}
 	if err == nil {
 		if p.err = p.mount(); p.err == nil {
 			defer p.unmount()
 			// read the userdata - we read the spec file and the fallback, but eventually
 			// will remove the fallback
-			for _, f := range datafiles {
+			for _, f := range userdataFiles {
 				userdata, err := os.ReadFile(path.Join(p.mountPoint, f))
 				// did we find a file?
 				if err == nil && userdata != nil {
@@ -94,8 +95,15 @@ func NewProviderCDROM(device string, datafiles []string, providerType string) *P
 				}
 			}
 			if p.userdata == nil {
-				log.Debugf("no userdata file found at any of %v", datafiles)
+				log.Debugf("no userdata file found at any of %v", userdataFiles)
 			}
+			// read the metadata
+			metadata, err := os.ReadFile(path.Join(p.mountPoint, metadataFile))
+			// did we find a file?
+			if err == nil && metadata != nil {
+				p.metadata = metadata
+			}
+			p.unmount()
 		}
 	}
 	return &p

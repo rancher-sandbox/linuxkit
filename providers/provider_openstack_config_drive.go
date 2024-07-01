@@ -29,6 +29,7 @@ import (
 func ListConfigDrives() []Provider {
 	// UserdataFiles is where to find the user data
 	var userdataFiles = []string{"/openstack/latest/user_data"}
+	var metadataFile = "/openstack/latest/meta_data.json"
 	cdroms, err := filepath.Glob(cdromDevs)
 	if err != nil {
 		// Glob can only error on invalid pattern
@@ -44,7 +45,7 @@ func ListConfigDrives() []Provider {
 	log.Debugf("unique devices to be checked: %v", cdroms)
 	var providers []Provider
 	for _, device := range cdroms {
-		providers = append(providers, NewProviderCDROM(device, userdataFiles, "CONFIG_DRIVE"))
+		providers = append(providers, NewProviderCDROM(device, userdataFiles, metadataFile, "CONFIG_DRIVE"))
 	}
 	return providers
 }

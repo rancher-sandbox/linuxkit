@@ -28,7 +28,8 @@ import (
 // ListCDROMs lists all the cdroms in the system
 func ListCDROMs() []Provider {
 	// UserdataFiles is where to find the user data
-	var userdataFiles = []string{"user-data", "meta-data", "config"}
+	var userdataFiles = []string{"user-data", "config"}
+	var metadataFile = "meta-data"
 	cdroms, err := filepath.Glob(cdromDevs)
 	if err != nil {
 		// Glob can only error on invalid pattern
@@ -44,7 +45,7 @@ func ListCDROMs() []Provider {
 	log.Debugf("unique devices to be checked: %v", cdroms)
 	var providers []Provider
 	for _, device := range cdroms {
-		providers = append(providers, NewProviderCDROM(device, userdataFiles, "CDROM"))
+		providers = append(providers, NewProviderCDROM(device, userdataFiles, metadataFile, "CDROM"))
 	}
 	return providers
 }
