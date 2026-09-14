@@ -37,7 +37,7 @@ type suspExtension interface {
 	Descriptor() string
 	Source() string
 	Version() uint8
-	GetFileExtensions(string, bool, bool) ([]directoryEntrySystemUseExtension, error)
+	GetFileExtensions(*finalizeFileInfo, bool, bool) ([]directoryEntrySystemUseExtension, error)
 	GetFinalizeExtensions(*finalizeFileInfo) ([]directoryEntrySystemUseExtension, error)
 	Relocatable() bool
 	Relocate(map[string]*finalizeFileInfo) ([]*finalizeFileInfo, map[string]*finalizeFileInfo, error)
@@ -511,10 +511,13 @@ func parseDirectoryEntryExtensions(b []byte, handlers []suspExtension) ([]direct
 	entries := make([]directoryEntrySystemUseExtension, 0)
 	lastEntryBySignature := map[string]directoryEntrySystemUseExtension{}
 	// minimum size of 4 bytes for any SUSP entry
-	for i := 0; i+4 < len(b); {
+	for i := 0; i+3 < len(b); {
 		// get the indicator
 		signature := string(b[i : i+2])
 		size := b[i+2]
+		if size < 4 {
+			break
+		}
 		suspBytes := b[i : i+int(size)]
 		var (
 			entry directoryEntrySystemUseExtension
