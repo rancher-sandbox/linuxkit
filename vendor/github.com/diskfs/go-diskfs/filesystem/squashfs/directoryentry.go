@@ -1,50 +1,13 @@
 package squashfs
 
 import (
+	"fmt"
+	"io/fs"
 	"os"
 	"time"
+
+	"github.com/diskfs/go-diskfs/filesystem"
 )
-
-// FileStat is the extended data underlying a single file, similar to https://golang.org/pkg/syscall/#Stat_t
-type FileStat struct {
-	uid    uint32
-	gid    uint32
-	xattrs map[string]string
-}
-
-func (f *FileStat) equal(o *FileStat) bool {
-	if f.uid != o.uid || f.gid != o.gid {
-		return false
-	}
-	if len(f.xattrs) != len(o.xattrs) {
-		return false
-	}
-	for k, v := range f.xattrs {
-		ov, ok := o.xattrs[k]
-		if !ok {
-			return false
-		}
-		if ov != v {
-			return false
-		}
-	}
-	return true
-}
-
-// UID get uid of file
-func (f *FileStat) UID() uint32 {
-	return f.uid
-}
-
-// GID get gid of file
-func (f *FileStat) GID() uint32 {
-	return f.gid
-}
-
-// Xattrs get extended attributes of file
-func (f *FileStat) Xattrs() map[string]string {
-	return f.xattrs
-}
 
 // directoryEntry is a single directory entry
 // it combines information from inode and the actual entry
@@ -57,20 +20,20 @@ func (f *FileStat) Xattrs() map[string]string {
 //	IsDir() bool        // abbreviation for Mode().IsDir()
 //	Sys() interface{}   // underlying data source (can return nil)
 type directoryEntry struct {
-	isSubdirectory bool
+	fs             *FileSystem // the FileSystem this entry is part of
 	name           string
 	size           int64
 	modTime        time.Time
 	mode           os.FileMode
 	inode          inode
-	sys            FileStat
+	uid            uint32
+	gid            uint32
+	xattrs         map[string]string
+	isSubdirectory bool
 }
 
 func (d *directoryEntry) equal(o *directoryEntry) bool {
 	if o == nil {
-		return false
-	}
-	if !d.sys.equal(&o.sys) {
 		return false
 	}
 	if d.inode == nil && o.inode == nil {
@@ -82,7 +45,7 @@ func (d *directoryEntry) equal(o *directoryEntry) bool {
 	if !d.inode.equal(o.inode) {
 		return false
 	}
-	return d.isSubdirectory == o.isSubdirectory && d.name == o.name && d.size == o.size && d.modTime == o.modTime && d.mode == o.mode
+	return d.isSubdirectory == o.isSubdirectory && d.name == o.name && d.size == o.size && d.modTime.Equal(o.modTime) && d.mode == o.mode
 }
 
 // Name string       // base name of the file
@@ -105,12 +68,208 @@ func (d *directoryEntry) ModTime() time.Time {
 	return d.modTime
 }
 
-// Mode FileMode     // file mode bits
-func (d *directoryEntry) Mode() os.FileMode {
-	return d.mode
+// Info returns the FileInfo representation of the directory entry
+func (d *directoryEntry) Info() (fs.FileInfo, error) {
+	return d, nil
 }
 
-// Sys interface{}   // underlying data source (can return nil)
+// Type returns the type of the directory entry
+func (d *directoryEntry) Type() fs.FileMode {
+	return d.Mode().Type()
+}
+
+// Mode FileMode     // file mode bits
+func (d *directoryEntry) Mode() os.FileMode {
+	mode := d.mode
+
+	// We need to adjust the Linux mode into a Go mode
+	// The bottom 3*3 bits are the traditional unix permissions.
+
+	// Clear the non permissions bits
+	mode &= os.ModePerm
+
+	if d.inode == nil {
+		return mode
+	}
+	switch d.inode.inodeType() {
+	case inodeBasicDirectory, inodeExtendedDirectory:
+		mode |= os.ModeDir // d: is a directory
+	case inodeBasicFile, inodeExtendedFile:
+		// zero mode
+	case inodeBasicSymlink, inodeExtendedSymlink:
+		mode |= os.ModeSymlink // L: symbolic link
+	case inodeBasicBlock, inodeExtendedBlock:
+		mode |= os.ModeDevice // D: device file
+	case inodeBasicChar, inodeExtendedChar:
+		mode |= os.ModeDevice     // D: device file
+		mode |= os.ModeCharDevice // c: Unix character device, when ModeDevice is set
+	case inodeBasicFifo, inodeExtendedFifo:
+		mode |= os.ModeNamedPipe // p: named pipe (FIFO)
+	case inodeBasicSocket, inodeExtendedSocket:
+		mode |= os.ModeSocket // S: Unix domain socket
+	default:
+		mode |= os.ModeIrregular // ?: non-regular file; nothing else is known about this file
+	}
+
+	// Not currently translated
+	// mode |= os.ModeAppend          // a: append-only
+	// mode |= os.ModeExclusive       // l: exclusive use
+	// mode |= os.ModeTemporary       // T: temporary file; Plan 9 only
+	// mode |= os.ModeSetuid          // u: setuid
+	// mode |= os.ModeSetgid          // g: setgid
+	// mode |= os.ModeSticky          // t: sticky
+
+	return mode
+}
+
+// Sys returns *StatT with squashfs-specific metadata.
 func (d *directoryEntry) Sys() interface{} {
-	return d.sys
+	return d.statT()
+}
+
+func (d *directoryEntry) statT() *StatT {
+	s := &StatT{
+		UID:       d.uid,
+		GID:       d.gid,
+		Xattrs:    d.xattrs,
+		InodeType: "unknown",
+	}
+	if d.inode != nil {
+		s.Inode = d.inode.index()
+		s.InodeType = inodeTypeName(d.inode.inodeType())
+		if target, err := d.Readlink(); err == nil {
+			s.LinkTarget = target
+		}
+	}
+	return s
+}
+
+func inodeTypeName(t inodeType) string {
+	switch t {
+	case inodeBasicDirectory:
+		return "basic-directory"
+	case inodeBasicFile:
+		return "basic-file"
+	case inodeBasicSymlink:
+		return "basic-symlink"
+	case inodeBasicBlock:
+		return "basic-block-device"
+	case inodeBasicChar:
+		return "basic-char-device"
+	case inodeBasicFifo:
+		return "basic-fifo"
+	case inodeBasicSocket:
+		return "basic-socket"
+	case inodeExtendedDirectory:
+		return "extended-directory"
+	case inodeExtendedFile:
+		return "extended-file"
+	case inodeExtendedSymlink:
+		return "extended-symlink"
+	case inodeExtendedBlock:
+		return "extended-block-device"
+	case inodeExtendedChar:
+		return "extended-char-device"
+	case inodeExtendedFifo:
+		return "extended-fifo"
+	case inodeExtendedSocket:
+		return "extended-socket"
+	default:
+		return "unknown"
+	}
+}
+
+// Readlink returns the destination of the symbolic link if this entry
+// is a symbolic link.
+//
+// If this entry is not a symbolic link then it will return fs.ErrNotExist
+func (d *directoryEntry) Readlink() (string, error) {
+	var target string
+	body := d.inode.getBody()
+	//nolint:exhaustive // all other cases fall under default
+	switch d.inode.inodeType() {
+	case inodeBasicSymlink:
+		link, ok := body.(*basicSymlink)
+		if !ok {
+			return "", fmt.Errorf("internal error: inode wasn't basic symlink: %T", body)
+		}
+		target = link.target
+	case inodeExtendedSymlink:
+		link, ok := body.(*extendedSymlink)
+		if !ok {
+			return "", fmt.Errorf("internal error: inode wasn't extended symlink: %T", body)
+		}
+		target = link.target
+	default:
+		return "", fs.ErrNotExist
+	}
+	return target, nil
+}
+
+// Open returns an filesystem.File from which you can read the
+// contents of a file.
+//
+// Calling this on anything but a file will return an error.
+//
+// Calling this Open method is more efficient than calling
+// FileSystem.OpenFile as it doesn't have to find the file by
+// traversing the directory entries first.
+func (d *directoryEntry) Open() (filesystem.File, error) {
+	// get the inode data for this file
+	// now open the file
+	// get the inode for the file
+	var (
+		eFile *extendedFile
+		f     filesystem.File
+		err   error
+	)
+	in := d.inode
+	iType := in.inodeType()
+	body := in.getBody()
+	//nolint:exhaustive // all other cases fall under default
+	switch iType {
+	case inodeBasicFile:
+		bFile, _ := body.(*basicFile)
+		extFile := bFile.toExtended()
+		eFile = &extFile
+		f = &File{
+			directoryEntry: d,
+			extendedFile:   eFile,
+			isReadWrite:    false,
+			isAppend:       false,
+			offset:         0,
+			filesystem:     d.fs,
+		}
+	case inodeExtendedFile:
+		eFile, _ = body.(*extendedFile)
+		f = &File{
+			directoryEntry: d,
+			extendedFile:   eFile,
+			isReadWrite:    false,
+			isAppend:       false,
+			offset:         0,
+			filesystem:     d.fs,
+		}
+	case inodeBasicSymlink:
+		bLink, _ := body.(*basicSymlink)
+		target := bLink.target
+		f, err = d.fs.OpenFile(target, os.O_RDONLY)
+	case inodeExtendedSymlink:
+		eLink, _ := body.(*extendedSymlink)
+		target := eLink.target
+		f, err = d.fs.OpenFile(target, os.O_RDONLY)
+	case inodeBasicDirectory, inodeExtendedDirectory:
+		f = &File{
+			directoryEntry: d,
+			extendedFile:   eFile,
+			isReadWrite:    false,
+			isAppend:       false,
+			offset:         0,
+			filesystem:     d.fs,
+		}
+	default:
+		return nil, fmt.Errorf("inode is of type %d, neither basic nor extended file", iType)
+	}
+
+	return f, err
 }

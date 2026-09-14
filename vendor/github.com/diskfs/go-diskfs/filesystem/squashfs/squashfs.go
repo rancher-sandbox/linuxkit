@@ -4,12 +4,14 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	iofs "io/fs"
 	"math"
 	"os"
 	"path"
+	"time"
 
+	"github.com/diskfs/go-diskfs/backend"
 	"github.com/diskfs/go-diskfs/filesystem"
-	"github.com/diskfs/go-diskfs/util"
 )
 
 const (
@@ -17,6 +19,7 @@ const (
 	metadataBlockSize = 8 * KB
 	minBlocksize      = 4 * KB
 	maxBlocksize      = 1 * MB
+	defaultCacheSize  = 128 * MB
 )
 
 // FileSystem implements the FileSystem interface
@@ -24,19 +27,19 @@ type FileSystem struct {
 	workspace  string
 	superblock *superblock
 	size       int64
-	start      int64
-	file       util.File
+	backend    backend.Storage
 	blocksize  int64
 	compressor Compressor
 	fragments  []*fragmentEntry
 	uidsGids   []uint32
 	xattrs     *xAttrTable
 	rootDir    inode
+	cache      *lru
 }
 
 // Equal compare if two filesystems are equal
 func (fs *FileSystem) Equal(a *FileSystem) bool {
-	localMatch := fs.file == a.file && fs.size == a.size
+	localMatch := fs.backend == a.backend && fs.size == a.size
 	superblockMatch := fs.superblock.equal(a.superblock)
 	return localMatch && superblockMatch
 }
@@ -47,7 +50,7 @@ func (fs *FileSystem) Label() string {
 }
 
 func (fs *FileSystem) SetLabel(string) error {
-	return fmt.Errorf("SquashFS filesystem is read-only")
+	return filesystem.ErrReadonlyFilesystem
 }
 
 // Workspace get the workspace path
@@ -57,8 +60,8 @@ func (fs *FileSystem) Workspace() string {
 
 // Create creates a squashfs filesystem in a given directory
 //
-// requires the util.File where to create the filesystem, size is the size of the filesystem in bytes,
-// start is how far in bytes from the beginning of the util.File to create the filesystem,
+// requires the backend.Storage where to create the filesystem, size is the size of the filesystem in bytes,
+// start is how far in bytes from the beginning of the backend.Storage to create the filesystem,
 // and blocksize is is the logical blocksize to use for creating the filesystem
 //
 // note that you are *not* required to create the filesystem on the entire disk. You could have a disk of size
@@ -70,7 +73,7 @@ func (fs *FileSystem) Workspace() string {
 // where a partition starts and ends.
 //
 // If the provided blocksize is 0, it will use the default of 128 KB.
-func Create(f util.File, size, start, blocksize int64) (*FileSystem, error) {
+func Create(b backend.Storage, size, start, blocksize int64) (*FileSystem, error) {
 	if blocksize == 0 {
 		blocksize = defaultBlockSize
 	}
@@ -86,21 +89,30 @@ func Create(f util.File, size, start, blocksize int64) (*FileSystem, error) {
 		return nil, fmt.Errorf("could not create working directory: %v", err)
 	}
 
+	// Wrap the backend so all internal ReadAt/WriteAt calls in this
+	// package use offsets relative to the start of the filesystem.
+	// Finalize and Read are coded throughout in terms of squashfs-
+	// internal offsets; without this wrapping, every write/read on a
+	// non-zero start (i.e. inside a partition) would land at the wrong
+	// place on the underlying disk.
+	if start != 0 {
+		b = backend.Sub(b, start, size)
+	}
+
 	// create root directory
 	// there is nothing in there
 	return &FileSystem{
 		workspace: tmpdir,
-		start:     start,
 		size:      size,
-		file:      f,
+		backend:   b,
 		blocksize: blocksize,
 	}, nil
 }
 
 // Read reads a filesystem from a given disk.
 //
-// requires the util.File where to read the filesystem, size is the size of the filesystem in bytes,
-// start is how far in bytes from the beginning of the util.File the filesystem is expected to begin,
+// requires the backend.Storage where to read the filesystem, size is the size of the filesystem in bytes,
+// start is how far in bytes from the beginning of the backend.Storage the filesystem is expected to begin,
 // and blocksize is is the logical blocksize to use for creating the filesystem
 //
 // note that you are *not* required to read a filesystem on the entire disk. You could have a disk of size
@@ -111,8 +123,39 @@ func Create(f util.File, size, start, blocksize int64) (*FileSystem, error) {
 // which allow you to work directly with partitions, rather than having to calculate (and hopefully not make any errors)
 // where a partition starts and ends.
 //
-// If the provided blocksize is 0, it will use the default of 2K bytes
-func Read(file util.File, size, start, blocksize int64) (*FileSystem, error) {
+// If the provided blocksize is 0, it will use the default of 2K bytes.
+//
+// This will use a cache for the decompressed blocks of 128 MB by
+// default. (You can set this with the SetCacheSize method and read
+// its size with the GetCacheSize method). A block cache is essential
+// for performance when reading. This implements a cache for the
+// fragments (tail ends of files) and the metadata (directory
+// listings) which otherwise would be read, decompressed and discarded
+// many times.
+//
+// Unpacking a 3 GB squashfs made from the tensorflow docker image like this:
+//
+//	docker export $(docker create tensorflow/tensorflow:latest-gpu-jupyter) -o tensorflow.tar.gz
+//	mkdir -p tensorflow && tar xf tensorflow.tar.gz -C tensorflow
+//	[ -f tensorflow.sqfs ] && rm tensorflow.sqfs
+//	mksquashfs tensorflow tensorflow.sqfs  -comp zstd -Xcompression-level 3 -b 1M -no-xattrs -all-root
+//
+// Gives these timings with and without cache:
+//
+// - no caching:   206s
+// - 256 MB cache:  16.7s
+// - 128 MB cache:  17.5s (the default)
+// - 64 MB cache:   23.4s
+// - 32 MB cache:   54.s
+//
+// The cached versions compare favourably to the C program unsquashfs
+// which takes 12.0s to unpack the same archive.
+//
+// These tests were done using rclone and the archive backend which
+// uses this library like this:
+//
+//	rclone -P --transfers 16 --checkers 16 copy :archive:/path/to/tensorflow.sqfs /tmp/tensorflow
+func Read(b backend.Storage, size, start, blocksize int64) (*FileSystem, error) {
 	var (
 		read int
 		err  error
@@ -126,11 +169,21 @@ func Read(file util.File, size, start, blocksize int64) (*FileSystem, error) {
 		return nil, err
 	}
 
+	// Wrap the backend so all subsequent ReadAt calls use offsets
+	// relative to the start of the filesystem. The squashfs metadata
+	// (fragment table, inode table, etc.) carries squashfs-internal
+	// offsets, and helpers like readFragmentTable, readXattrsTable and
+	// readUidsGids ReadAt those offsets directly. Without wrapping,
+	// any non-zero start would land them at the wrong place on disk.
+	if start != 0 {
+		b = backend.Sub(b, start, size)
+	}
+
 	// load the information from the disk
 
 	// read the superblock
-	b := make([]byte, superblockSize)
-	read, err = file.ReadAt(b, start)
+	superblockBytes := make([]byte, superblockSize)
+	read, err = b.ReadAt(superblockBytes, 0)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read bytes for superblock: %v", err)
 	}
@@ -139,7 +192,7 @@ func Read(file util.File, size, start, blocksize int64) (*FileSystem, error) {
 	}
 
 	// parse superblock
-	s, err := parseSuperblock(b)
+	s, err := parseSuperblock(superblockBytes)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing superblock: %v", err)
 	}
@@ -147,11 +200,11 @@ func Read(file util.File, size, start, blocksize int64) (*FileSystem, error) {
 	// create the compressor function we will use
 	compress, err := newCompressor(s.compression)
 	if err != nil {
-		return nil, fmt.Errorf("unable to create compressor")
+		return nil, fmt.Errorf("unable to create compressor: %v", err)
 	}
 
 	// load fragments
-	fragments, err := readFragmentTable(s, file, compress)
+	fragments, err := readFragmentTable(s, b, compress)
 	if err != nil {
 		return nil, fmt.Errorf("error reading fragments: %v", err)
 	}
@@ -160,31 +213,31 @@ func Read(file util.File, size, start, blocksize int64) (*FileSystem, error) {
 	var (
 		xattrs *xAttrTable
 	)
-	if !s.noXattrs {
+	if !s.noXattrs && s.xattrTableStart != 0xffff_ffff_ffff_ffff {
 		// xattr is right to the end of the disk
-		xattrs, err = readXattrsTable(s, file, compress)
+		xattrs, err = readXattrsTable(s, b, compress)
 		if err != nil {
 			return nil, fmt.Errorf("error reading xattr table: %v", err)
 		}
 	}
 
 	// read uidsgids
-	uidsgids, err := readUidsGids(s, file, compress)
+	uidsgids, err := readUidsGids(s, b, compress)
 	if err != nil {
 		return nil, fmt.Errorf("error reading uids/gids: %v", err)
 	}
 
 	fs := &FileSystem{
 		workspace:  "", // no workspace when we do nothing with it
-		start:      start,
 		size:       size,
-		file:       file,
+		backend:    b,
 		superblock: s,
-		blocksize:  blocksize,
+		blocksize:  int64(s.blocksize), // use the blocksize in the superblock
 		xattrs:     xattrs,
 		compressor: compress,
 		fragments:  fragments,
 		uidsGids:   uidsgids,
+		cache:      newLRU(int(defaultCacheSize) / int(s.blocksize)),
 	}
 	// for efficiency, read in the root inode right now
 	rootInode, err := fs.getInode(s.rootInode.block, s.rootInode.offset, inodeBasicDirectory)
@@ -195,9 +248,44 @@ func Read(file util.File, size, start, blocksize int64) (*FileSystem, error) {
 	return fs, nil
 }
 
+// interface guard
+var _ filesystem.FileSystem = (*FileSystem)(nil)
+
+// Delete the temporary directory created during the SquashFS image creation
+func (fs *FileSystem) Close() error {
+	if fs.workspace != "" {
+		return os.RemoveAll(fs.workspace)
+	}
+	return nil
+}
+
 // Type returns the type code for the filesystem. Always returns filesystem.TypeFat32
 func (fs *FileSystem) Type() filesystem.Type {
 	return filesystem.TypeSquashfs
+}
+
+// SetCacheSize set the maximum memory used by the block cache to cacheSize bytes.
+//
+// The default is 128 MB.
+//
+// If this is <= 0 then the cache will be disabled.
+func (fs *FileSystem) SetCacheSize(cacheSize int) {
+	if fs.cache == nil {
+		return
+	}
+	blocks := cacheSize / int(fs.blocksize)
+	if blocks <= 0 {
+		blocks = 0
+	}
+	fs.cache.setMaxBlocks(blocks)
+}
+
+// GetCacheSize get the maximum memory used by the block cache in bytes.
+func (fs *FileSystem) GetCacheSize() int {
+	if fs.cache == nil {
+		return 0
+	}
+	return fs.cache.maxBlocks * int(fs.blocksize)
 }
 
 // Mkdir make a directory at the given path. It is equivalent to `mkdir -p`, i.e. idempotent, in that:
@@ -207,10 +295,13 @@ func (fs *FileSystem) Type() filesystem.Type {
 //
 // if readonly and not in workspace, will return an error
 func (fs *FileSystem) Mkdir(p string) error {
-	if fs.workspace == "" {
-		return fmt.Errorf("cannot write to read-only filesystem")
+	if err := validatePath(p); err != nil {
+		return err
 	}
-	err := os.MkdirAll(path.Join(fs.workspace, p), 0o755)
+	if fs.workspace == "" {
+		return filesystem.ErrReadonlyFilesystem
+	}
+	err := os.MkdirAll(workspacePath(fs.workspace, p), 0o755)
 	if err != nil {
 		return fmt.Errorf("could not create directory %s: %v", p, err)
 	}
@@ -218,41 +309,103 @@ func (fs *FileSystem) Mkdir(p string) error {
 	return err
 }
 
+// creates a filesystem node (file, device special file, or named pipe) named pathname,
+// with attributes specified by mode and dev
+//
+//nolint:revive // parameters will be used eventually
+func (fs *FileSystem) Mknod(pathname string, mode uint32, dev int) error {
+	// https://dr-emann.github.io/squashfs/squashfs.html#_device_special_files
+	// https://dr-emann.github.io/squashfs/squashfs.html#_ipc_inodes_fifo_or_socket
+	return filesystem.ErrNotImplemented
+}
+
+// creates a new link (also known as a hard link) to an existing file.
+//
+//nolint:revive // parameters will be used eventually
+func (fs *FileSystem) Link(oldpath, newpath string) error {
+	// https://dr-emann.github.io/squashfs/squashfs.html#_symbolic_links
+	return filesystem.ErrNotImplemented
+}
+
+// creates a symbolic link named linkpath which contains the string target.
+//
+//nolint:revive // parameters will be used eventually
+func (fs *FileSystem) Symlink(oldpath, newpath string) error {
+	// https://dr-emann.github.io/squashfs/squashfs.html#_symbolic_links
+	return filesystem.ErrNotImplemented
+}
+
+// Chmod changes the mode of the named file to mode. If the file is a symbolic link,
+// it changes the mode of the link's target.
+func (fs *FileSystem) Chmod(name string, mode os.FileMode) error {
+	if err := validatePath(name); err != nil {
+		return err
+	}
+
+	if fs.workspace == "" {
+		return filesystem.ErrReadonlyFilesystem
+	}
+
+	return os.Chmod(workspacePath(fs.workspace, name), mode)
+}
+
+// Chown changes the numeric uid and gid of the named file. If the file is a symbolic link,
+// it changes the uid and gid of the link's target. A uid or gid of -1 means to not change that value
+//
+//nolint:revive // parameters will be used eventually
+func (fs *FileSystem) Chown(name string, uid, gid int) error {
+	// https://dr-emann.github.io/squashfs/squashfs.html#_id_table
+	return filesystem.ErrNotImplemented
+}
+
+// Chtimes changes the file creation, access and modification times
+//
+//nolint:revive // parameters will be used eventually
+func (fs *FileSystem) Chtimes(name string, ctime, atime, mtime time.Time) error {
+	return filesystem.ErrNotImplemented
+}
+
 // ReadDir return the contents of a given directory in a given filesystem.
 //
-// Returns a slice of os.FileInfo with all of the entries in the directory.
+// Returns a slice of fs.DirEntry with all of the entries in the directory.
 //
 // Will return an error if the directory does not exist or is a regular file and not a directory
-func (fs *FileSystem) ReadDir(p string) ([]os.FileInfo, error) {
-	var fi []os.FileInfo
+func (fs *FileSystem) ReadDir(p string) ([]iofs.DirEntry, error) {
+	// should not accept anything that starts with /
+	if err := validatePath(p); err != nil {
+		return nil, err
+	}
+	var de []iofs.DirEntry
 	// non-workspace: read from squashfs
 	// workspace: read from regular filesystem
 	if fs.workspace != "" {
-		fullPath := path.Join(fs.workspace, p)
+		fullPath := workspacePath(fs.workspace, p)
 		// read the entries
 		dirEntries, err := os.ReadDir(fullPath)
 		if err != nil {
 			return nil, fmt.Errorf("could not read directory %s: %v", p, err)
 		}
-		for _, e := range dirEntries {
-			info, err := e.Info()
-			if err != nil {
-				return nil, fmt.Errorf("could not read directory %s: %v", p, err)
-			}
-
-			fi = append(fi, info)
-		}
+		de = append(de, dirEntries...)
 	} else {
 		dirEntries, err := fs.readDirectory(p)
 		if err != nil {
 			return nil, fmt.Errorf("error reading directory %s: %v", p, err)
 		}
-		fi = make([]os.FileInfo, 0, len(dirEntries))
-		for _, entry := range dirEntries {
-			fi = append(fi, entry)
+		for _, e := range dirEntries {
+			de = append(de, e)
 		}
 	}
-	return fi, nil
+	return de, nil
+}
+
+// Open returns an fs.File from which you can read the contents of a file
+// Especially useful for doing fs.FS operations
+func (fs *FileSystem) Open(p string) (iofs.File, error) {
+	file, err := fs.OpenFile(p, os.O_RDONLY)
+	if err != nil {
+		return nil, err
+	}
+	return file, nil
 }
 
 // OpenFile returns an io.ReadWriter from which you can read the contents of a file
@@ -262,6 +415,10 @@ func (fs *FileSystem) ReadDir(p string) ([]os.FileInfo, error) {
 //
 // returns an error if the file does not exist
 func (fs *FileSystem) OpenFile(p string, flag int) (filesystem.File, error) {
+	// should not accept anything that starts with /
+	if err := validatePath(p); err != nil {
+		return nil, err
+	}
 	var f filesystem.File
 	var err error
 
@@ -269,77 +426,109 @@ func (fs *FileSystem) OpenFile(p string, flag int) (filesystem.File, error) {
 	dir := path.Dir(p)
 	filename := path.Base(p)
 
-	// if the dir == filename, then it is just /
-	if dir == filename {
-		return nil, fmt.Errorf("cannot open directory %s as file", p)
-	}
-
 	// cannot open to write or append or create if we do not have a workspace
 	writeMode := flag&os.O_WRONLY != 0 || flag&os.O_RDWR != 0 || flag&os.O_APPEND != 0 || flag&os.O_CREATE != 0 || flag&os.O_TRUNC != 0 || flag&os.O_EXCL != 0
 	if fs.workspace == "" {
 		if writeMode {
-			return nil, fmt.Errorf("cannot write to read-only filesystem")
-		}
-
-		// get the directory entries
-		var entries []*directoryEntry
-		entries, err = fs.readDirectory(dir)
-		if err != nil {
-			return nil, fmt.Errorf("could not read directory entries for %s", dir)
+			return nil, filesystem.ErrReadonlyFilesystem
 		}
 		// we now know that the directory exists, see if the file exists
 		var targetEntry *directoryEntry
-		for _, e := range entries {
-			eName := e.Name()
-			// cannot do anything with directories
-			if eName == filename && e.IsDir() {
-				return nil, fmt.Errorf("cannot open directory %s as file", p)
+
+		// what if we asked for root?
+		if dir == filename && filename == "." {
+			targetEntry, err = fs.directoryEntryFromInode(".", fs.rootDir, true)
+			if err != nil {
+				return nil, fmt.Errorf("could not read root directory info: %v", err)
 			}
-			if eName == filename {
+		} else {
+			// get the directory entries
+			var entries []*directoryEntry
+			entries, err = fs.readDirectory(dir)
+			if err != nil {
+				return nil, fmt.Errorf("could not read directory entries for %s", dir)
+			}
+			for _, e := range entries {
+				eName := e.Name()
+				if eName != filename {
+					continue
+				}
+				// cannot do anything with directories
+				if e.IsDir() {
+					return nil, fmt.Errorf("cannot open directory %s as file", p)
+				}
 				// if we got this far, we have found the file
 				targetEntry = e
 				break
 			}
 		}
-
 		// see if the file exists
 		// if the file does not exist, and is not opened for os.O_CREATE, return an error
 		if targetEntry == nil {
 			return nil, fmt.Errorf("target file %s does not exist", p)
 		}
-		// get the inode data for this file
-		// now open the file
-		// get the inode for the file
-		var eFile *extendedFile
-		in := targetEntry.inode
-		iType := in.inodeType()
-		body := in.getBody()
-		//nolint:exhaustive // all other cases fall under default
-		switch iType {
-		case inodeBasicFile:
-			extFile := body.(*basicFile).toExtended()
-			eFile = &extFile
-		case inodeExtendedFile:
-			eFile, _ = body.(*extendedFile)
-		default:
-			return nil, fmt.Errorf("inode is of type %d, neither basic nor extended directory", iType)
-		}
-
-		f = &File{
-			extendedFile: eFile,
-			isReadWrite:  false,
-			isAppend:     false,
-			offset:       0,
-			filesystem:   fs,
+		f, err = targetEntry.Open()
+		if err != nil {
+			return nil, err
 		}
 	} else {
-		f, err = os.OpenFile(path.Join(fs.workspace, p), flag, 0o644)
+		f, err = os.OpenFile(workspacePath(fs.workspace, p), flag, 0o644)
 		if err != nil {
 			return nil, fmt.Errorf("target file %s does not exist: %v", p, err)
 		}
 	}
 
 	return f, nil
+}
+
+// ReadFile implements ReadFileFS to read an entire file into memory
+func (fs *FileSystem) ReadFile(name string) ([]byte, error) {
+	f, err := fs.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
+
+// Rename renames (moves) oldpath to newpath. If newpath already exists and is not a directory, Rename replaces it.
+func (fs *FileSystem) Rename(oldpath, newpath string) error {
+	if fs.workspace == "" {
+		return filesystem.ErrReadonlyFilesystem
+	}
+	return os.Rename(workspacePath(fs.workspace, oldpath), workspacePath(fs.workspace, newpath))
+}
+
+func (fs *FileSystem) Remove(p string) error {
+	if fs.workspace == "" {
+		return filesystem.ErrReadonlyFilesystem
+	}
+	return os.Remove(workspacePath(fs.workspace, p))
+}
+
+// Stat returns a FileInfo describing the file.
+func (fs *FileSystem) Stat(name string) (iofs.FileInfo, error) {
+	if err := validatePath(name); err != nil {
+		return nil, err
+	}
+	if name == "." {
+		if fs.workspace != "" {
+			return os.Stat(workspacePath(fs.workspace, name))
+		}
+		return fs.directoryEntryFromInode(".", fs.rootDir, true)
+	}
+	dir := path.Dir(name)
+	basename := path.Base(name)
+	des, err := fs.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("could not read directory %s: %v", dir, err)
+	}
+	for _, de := range des {
+		if de.Name() == basename {
+			return de.Info()
+		}
+	}
+	return nil, &iofs.PathError{Op: "stat", Path: name, Err: fmt.Errorf("file %s not found in directory %s", basename, dir)}
 }
 
 // readDirectory - read directory entry on squashfs only (not workspace)
@@ -387,7 +576,7 @@ func (fs *FileSystem) getDirectoryEntries(p string, in inode) ([]*directoryEntry
 	entriesRaw := dir.entries
 	var entries []*directoryEntry
 	// if this is the directory we are looking for, return the entries
-	if len(parts) == 0 {
+	if len(parts) == 0 || (len(parts) == 1 && parts[0] == ".") {
 		entries, err = fs.hydrateDirectoryEntries(entriesRaw)
 		if err != nil {
 			return nil, fmt.Errorf("could not populate directory entries for %s with properties: %v", p, err)
@@ -430,30 +619,42 @@ func (fs *FileSystem) hydrateDirectoryEntries(entries []*directoryEntryRaw) ([]*
 		if err != nil {
 			return nil, fmt.Errorf("error finding inode for %s: %v", e.name, err)
 		}
-		body, header := in.getBody(), in.getHeader()
-		xattrIndex, has := body.xattrIndex()
-		xattrs := map[string]string{}
-		if has && xattrIndex != noXattrInodeFlag {
-			xattrs, err = fs.xattrs.find(int(xattrIndex))
-			if err != nil {
-				return nil, fmt.Errorf("error reading xattrs for %s: %v", e.name, err)
-			}
+		entry, err := fs.directoryEntryFromInode(e.name, in, e.isSubdirectory)
+		if err != nil {
+			return nil, err
 		}
-		fullEntries = append(fullEntries, &directoryEntry{
-			isSubdirectory: e.isSubdirectory,
-			name:           e.name,
-			size:           body.size(),
-			modTime:        header.modTime,
-			mode:           header.mode,
-			inode:          in,
-			sys: FileStat{
-				uid:    fs.uidsGids[header.uidIdx],
-				gid:    fs.uidsGids[header.gidIdx],
-				xattrs: xattrs,
-			},
-		})
+		fullEntries = append(fullEntries, entry)
 	}
 	return fullEntries, nil
+}
+
+func (fs *FileSystem) directoryEntryFromInode(name string, in inode, isSubdirectory bool) (*directoryEntry, error) {
+	body, header := in.getBody(), in.getHeader()
+	xattrIndex, has := body.xattrIndex()
+	xattrs := map[string]string{}
+	// An inode may advertise an xattr index even though the image was written
+	// without an xattr table (e.g. squashfs-tools-ng sets the NO_XATTRS superblock
+	// flag but leaves a non-sentinel index in the inode). fs.xattrs is nil in that
+	// case, so guard against it rather than dereferencing a nil table.
+	if has && fs.xattrs != nil {
+		var err error
+		xattrs, err = fs.xattrs.find(int(xattrIndex))
+		if err != nil {
+			return nil, fmt.Errorf("error reading xattrs for %s: %v", name, err)
+		}
+	}
+	return &directoryEntry{
+		fs:             fs,
+		isSubdirectory: isSubdirectory,
+		name:           name,
+		size:           body.size(),
+		modTime:        header.modTime,
+		mode:           header.mode,
+		inode:          in,
+		uid:            fs.uidsGids[header.uidIdx],
+		gid:            fs.uidsGids[header.gidIdx],
+		xattrs:         xattrs,
+	}, nil
 }
 
 // getInode read a single inode, given the block offset, and the offset in the
@@ -464,7 +665,7 @@ func (fs *FileSystem) getInode(blockOffset uint32, byteOffset uint16, iType inod
 	// get the block
 	// start by getting the minimum for the proposed type. It very well might be wrong.
 	size := inodeTypeToSize(iType)
-	uncompressed, err := readMetadata(fs.file, fs.compressor, int64(fs.superblock.inodeTableStart), blockOffset, byteOffset, size)
+	uncompressed, err := fs.readMetadata(fs.backend, fs.compressor, int64(fs.superblock.inodeTableStart), blockOffset, byteOffset, size)
 	if err != nil {
 		return nil, fmt.Errorf("error reading block at position %d: %v", blockOffset, err)
 	}
@@ -475,6 +676,14 @@ func (fs *FileSystem) getInode(blockOffset uint32, byteOffset uint16, iType inod
 	}
 	if header.inodeType != iType {
 		iType = header.inodeType
+		size = inodeTypeToSize(iType)
+		// Read more data if necessary (quite rare)
+		if size > len(uncompressed) {
+			uncompressed, err = fs.readMetadata(fs.backend, fs.compressor, int64(fs.superblock.inodeTableStart), blockOffset, byteOffset, size)
+			if err != nil {
+				return nil, fmt.Errorf("error reading block at position %d: %v", blockOffset, err)
+			}
+		}
 	}
 	// now read the body, which may have a variable size
 	body, extra, err := parseInodeBody(uncompressed[inodeHeaderSize:], int(fs.blocksize), iType)
@@ -484,7 +693,7 @@ func (fs *FileSystem) getInode(blockOffset uint32, byteOffset uint16, iType inod
 	// if it returns extra > 0, then it needs that many more bytes to be read, and to be reparsed
 	if extra > 0 {
 		size += extra
-		uncompressed, err = readMetadata(fs.file, fs.compressor, int64(fs.superblock.inodeTableStart), blockOffset, byteOffset, size)
+		uncompressed, err = fs.readMetadata(fs.backend, fs.compressor, int64(fs.superblock.inodeTableStart), blockOffset, byteOffset, size)
 		if err != nil {
 			return nil, fmt.Errorf("error reading block at position %d: %v", blockOffset, err)
 		}
@@ -504,7 +713,7 @@ func (fs *FileSystem) getInode(blockOffset uint32, byteOffset uint16, iType inod
 // block when uncompressed.
 func (fs *FileSystem) getDirectory(blockOffset uint32, byteOffset uint16, size int) (*directory, error) {
 	// get the block
-	uncompressed, err := readMetadata(fs.file, fs.compressor, int64(fs.superblock.directoryTableStart), blockOffset, byteOffset, size)
+	uncompressed, err := fs.readMetadata(fs.backend, fs.compressor, int64(fs.superblock.directoryTableStart), blockOffset, byteOffset, size)
 	if err != nil {
 		return nil, fmt.Errorf("error reading block at position %d: %v", blockOffset, err)
 	}
@@ -517,8 +726,12 @@ func (fs *FileSystem) getDirectory(blockOffset uint32, byteOffset uint16, size i
 }
 
 func (fs *FileSystem) readBlock(location int64, compressed bool, size uint32) ([]byte, error) {
+	// Zero size is a sparse block of blocksize
+	if size == 0 {
+		return make([]byte, fs.superblock.blocksize), nil
+	}
 	b := make([]byte, size)
-	read, err := fs.file.ReadAt(b, location)
+	read, err := fs.backend.ReadAt(b, location)
 	if err != nil && err != io.EOF {
 		return nil, fmt.Errorf("error reading block %d: %v", location, err)
 	}
@@ -543,25 +756,32 @@ func (fs *FileSystem) readFragment(index, offset uint32, fragmentSize int64) ([]
 		return nil, fmt.Errorf("cannot find fragment block with index %d", index)
 	}
 	fragmentInfo := fs.fragments[index]
-	// figure out the size of the compressed block and if it is compressed
-	b := make([]byte, fragmentInfo.size)
-	read, err := fs.file.ReadAt(b, int64(fragmentInfo.start))
-	if err != nil && err != io.EOF {
-		return nil, fmt.Errorf("unable to read fragment block %d: %v", index, err)
-	}
-	if read != len(b) {
-		return nil, fmt.Errorf("read %d instead of expected %d bytes for fragment block %d", read, len(b), index)
-	}
+	pos := int64(fragmentInfo.start)
+	data, _, err := fs.cache.get(pos, func() (data []byte, size uint16, err error) {
+		// figure out the size of the compressed block and if it is compressed
+		b := make([]byte, fragmentInfo.size)
+		read, err := fs.backend.ReadAt(b, pos)
+		if err != nil && err != io.EOF {
+			return nil, 0, fmt.Errorf("unable to read fragment block %d: %v", index, err)
+		}
+		if read != len(b) {
+			return nil, 0, fmt.Errorf("read %d instead of expected %d bytes for fragment block %d", read, len(b), index)
+		}
 
-	data := b
-	if fragmentInfo.compressed {
-		if fs.compressor == nil {
-			return nil, fmt.Errorf("fragment compressed but do not have valid compressor")
+		data = b
+		if fragmentInfo.compressed {
+			if fs.compressor == nil {
+				return nil, 0, fmt.Errorf("fragment compressed but do not have valid compressor")
+			}
+			data, err = fs.compressor.decompress(b)
+			if err != nil {
+				return nil, 0, fmt.Errorf("decompress error: %v", err)
+			}
 		}
-		data, err = fs.compressor.decompress(b)
-		if err != nil {
-			return nil, fmt.Errorf("decompress error: %v", err)
-		}
+		return data, 0, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	// now get the data from the offset
 	return data[offset : int64(offset)+fragmentSize], nil
@@ -581,7 +801,15 @@ func validateBlocksize(blocksize int64) error {
 	return nil
 }
 
-func readFragmentTable(s *superblock, file util.File, c Compressor) ([]*fragmentEntry, error) {
+func readFragmentTable(s *superblock, file backend.File, c Compressor) ([]*fragmentEntry, error) {
+	// if there are no fragments there is no fragment table to read. In that case
+	// fragmentTableStart holds the 0xffff... "not present" sentinel, so reading it
+	// would seek to a negative offset (int64(0xffff...) == -1). Images written
+	// without tail-end packing (e.g. squashfs-tools-ng with -no-tail-packing, or a
+	// single empty directory) hit this.
+	if s.fragmentCount == 0 {
+		return nil, nil
+	}
 	// get the first level index, which is just the pointers to the fragment table metadata blocks
 	blockCount := s.fragmentCount / 512
 	if s.fragmentCount%512 > 0 {
@@ -604,8 +832,9 @@ func readFragmentTable(s *superblock, file util.File, c Compressor) ([]*fragment
 	// load in the actual fragment entries
 	// read each block and uncompress it
 	var fragmentTable []*fragmentEntry
+	var fs = &FileSystem{}
 	for i, offset := range offsets {
-		uncompressed, _, err := readMetaBlock(file, c, offset)
+		uncompressed, _, err := fs.readMetaBlock(file, c, offset)
 		if err != nil {
 			return nil, fmt.Errorf("error reading meta block %d at position %d: %v", i, offset, err)
 		}
@@ -637,7 +866,7 @@ To read the xattr table:
 6- Read the id metablocks based on the indexes and uncompress if needed
 7- Read all of the xattr metadata. It starts at the location indicated by the header, and ends at the id table
 */
-func readXattrsTable(s *superblock, file util.File, c Compressor) (*xAttrTable, error) {
+func readXattrsTable(s *superblock, file backend.File, c Compressor) (*xAttrTable, error) {
 	// first read the header
 	b := make([]byte, xAttrHeaderSize)
 	read, err := file.ReadAt(b, int64(s.xattrTableStart))
@@ -674,13 +903,14 @@ func readXattrsTable(s *superblock, file util.File, c Compressor) (*xAttrTable, 
 	var (
 		uncompressed []byte
 		size         uint16
+		fs           = &FileSystem{}
 	)
 
 	bIndex := make([]byte, 0)
 	// convert those into indexes
 	for i := 0; i+8-1 < len(b); i += 8 {
 		locn := binary.LittleEndian.Uint64(b[i : i+8])
-		uncompressed, _, err = readMetaBlock(file, c, int64(locn))
+		uncompressed, _, err = fs.readMetaBlock(file, c, int64(locn))
 		if err != nil {
 			return nil, fmt.Errorf("error reading xattr index meta block %d at position %d: %v", i, locn, err)
 		}
@@ -690,22 +920,24 @@ func readXattrsTable(s *superblock, file util.File, c Compressor) (*xAttrTable, 
 	// now load the actual xAttrs data
 	xAttrEnd := binary.LittleEndian.Uint64(b[:8])
 	xAttrData := make([]byte, 0)
+	offsetMap := map[uint32]uint32{0: 0}
 	for i := xAttrStart; i < xAttrEnd; {
-		uncompressed, size, err = readMetaBlock(file, c, int64(i))
+		uncompressed, size, err = fs.readMetaBlock(file, c, int64(i))
 		if err != nil {
 			return nil, fmt.Errorf("error reading xattr data meta block at position %d: %v", i, err)
 		}
 		xAttrData = append(xAttrData, uncompressed...)
 		i += uint64(size)
+		offsetMap[uint32(i-xAttrStart)] = uint32(len(xAttrData))
 	}
 
 	// now have all of the indexes and metadata loaded
 	// need to pass it the offset of the beginning of the id table from the beginning of the disk
-	return parseXattrsTable(xAttrData, bIndex, s.idTableStart, c)
+	return parseXattrsTable(xAttrData, bIndex, offsetMap, c)
 }
 
-//nolint:unparam // this does not use offset or compressor yet, but only because we have not yet added support
-func parseXattrsTable(bUIDXattr, bIndex []byte, offset uint64, c Compressor) (*xAttrTable, error) {
+//nolint:unparam,unused,revive // this does not use compressor yet, but only because we have not yet added support
+func parseXattrsTable(bUIDXattr, bIndex []byte, offsetMap map[uint32]uint32, c Compressor) (*xAttrTable, error) {
 	// create the ID list
 	var (
 		xAttrIDList []*xAttrIndex
@@ -713,7 +945,7 @@ func parseXattrsTable(bUIDXattr, bIndex []byte, offset uint64, c Compressor) (*x
 
 	entrySize := int(xAttrIDEntrySize)
 	for i := 0; i+entrySize <= len(bIndex); i += entrySize {
-		entry, err := parseXAttrIndex(bIndex[i:])
+		entry, err := parseXAttrIndex(bIndex[i:], offsetMap)
 		if err != nil {
 			return nil, fmt.Errorf("error parsing xAttr ID table entry in position %d: %v", i, err)
 		}
@@ -739,7 +971,7 @@ To read the uids/gids table:
 4- Read the indexes. They are uncompressed, 8 bytes each (uint64); one index per id metablock
 5- Read the id metablocks based on the indexes and uncompress if needed
 */
-func readUidsGids(s *superblock, file util.File, c Compressor) ([]uint32, error) {
+func readUidsGids(s *superblock, file backend.File, c Compressor) ([]uint32, error) {
 	// find out how many xattr IDs we have and where the metadata starts. The table always starts
 	//   with this information
 	idStart := s.idTableStart
@@ -765,13 +997,14 @@ func readUidsGids(s *superblock, file util.File, c Compressor) ([]uint32, error)
 
 	var (
 		uncompressed []byte
+		fs           = &FileSystem{}
 	)
 
 	data := make([]byte, 0)
 	// convert those into indexes
 	for i := 0; i+8-1 < len(b); i += 8 {
 		locn := binary.LittleEndian.Uint64(b[i : i+8])
-		uncompressed, _, err = readMetaBlock(file, c, int64(locn))
+		uncompressed, _, err = fs.readMetaBlock(file, c, int64(locn))
 		if err != nil {
 			return nil, fmt.Errorf("error reading uidgid index meta block %d at position %d: %v", i, locn, err)
 		}
@@ -780,4 +1013,10 @@ func readUidsGids(s *superblock, file util.File, c Compressor) ([]uint32, error)
 
 	// now have all of the data loaded
 	return parseIDTable(data), nil
+}
+func validatePath(name string) error {
+	if !iofs.ValidPath(name) {
+		return iofs.ErrInvalid
+	}
+	return nil
 }
